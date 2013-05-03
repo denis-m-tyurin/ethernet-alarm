@@ -1,0 +1,9 @@
+Micropendous 	Target AVR
+PB4	 	RESET
+PB2 (MOSI) 	MOSI
+PB3 (MISO) 	MISO
+PB1 (SCK) 	SCK
+GND		GND
+
+http://code.google.com/p/micropendous/wiki/AVRISP
+http://code.google.com/p/micropendous/wiki/MicropendousA
