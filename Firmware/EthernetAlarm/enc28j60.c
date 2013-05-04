@@ -2,8 +2,8 @@
  * vim:sw=8:ts=8:si:et
  * To use the above modeline in vim you must have "set modeline" in your .vimrc
  * Author: Guido Socher 
- * Copyright: GPL V2
- * http://www.gnu.org/licenses/gpl.html
+ * Copyright:LGPL V2
+ * See http://www.gnu.org/licenses/old-licenses/lgpl-2.0.html
  *
  * Based on the enc28j60.c file from the AVRlib library by Pascal Stang.
  * For AVRlib See http://www.procyonengineering.com/
@@ -134,22 +134,18 @@ uint8_t enc28j60Read(uint8_t address)
         return enc28j60ReadOp(ENC28J60_READ_CTRL_REG, address);
 }
 
-// read upper 8 bits
-uint16_t enc28j60PhyReadH(uint8_t address)
+// read 16 bits
+uint16_t enc28j60PhyRead(uint8_t address)
 {
-
 	// Set the right address and start the register read operation
 	enc28j60Write(MIREGADR, address);
 	enc28j60Write(MICMD, MICMD_MIIRD);
-        _delay_loop_1(40); // 10us
-
 	// wait until the PHY read completes
 	while(enc28j60Read(MISTAT) & MISTAT_BUSY);
-
 	// reset reading bit
 	enc28j60Write(MICMD, 0x00);
-	
-	return (enc28j60Read(MIRDH));
+        // get data value from MIRDL and MIRDH
+	return ((enc28j60Read(MIRDH)<<8)|enc28j60Read(MIRDL));
 }
 
 void enc28j60Write(uint8_t address, uint8_t data)
@@ -287,11 +283,37 @@ uint8_t enc28j60getrev(void)
 	return(rev);
 }
 
+// A number of utility functions to enable/disable broadcast 
+void enc28j60EnableBroadcast( void ) {
+        uint8_t erxfcon;
+        erxfcon=enc28j60Read(ERXFCON);
+        erxfcon |= ERXFCON_BCEN;
+        enc28j60Write(ERXFCON, erxfcon);
+}
+
+void enc28j60DisableBroadcast( void ) {
+        uint8_t erxfcon;
+        erxfcon=enc28j60Read(ERXFCON);
+        erxfcon &= (0xff ^ ERXFCON_BCEN);
+        enc28j60Write(ERXFCON, erxfcon);
+}
+
 // link status
 uint8_t enc28j60linkup(void)
 {
-        // bit 10 (= bit 3 in upper reg)
-	return(enc28j60PhyReadH(PHSTAT2) && 4);
+        // PHSTAT1 LLSTAT (= bit 2 in lower reg), PHSTAT1_LLSTAT
+        // LLSTAT is latching, that is: if it was down since last
+        // calling enc28j60linkup then we get first a down indication
+        // and only at the next call to enc28j60linkup it will come up.
+        // This way we can detect intermittened link failures and
+        // that might be what we want.
+        // The non latching version is LSTAT.
+        // PHSTAT2 LSTAT (= bit 10 in upper reg)
+        if (enc28j60PhyRead(PHSTAT2) & (1<<10) ){
+        //if (enc28j60PhyRead(PHSTAT1) & PHSTAT1_LLSTAT){
+                return(1);
+        }
+        return(0);
 }
 
 void enc28j60PacketSend(uint16_t len, uint8_t* packet)
