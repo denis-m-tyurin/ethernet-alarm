@@ -6,18 +6,21 @@
  */ 
 
 #include <avr/io.h>
+#include <avr/interrupt.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ip_arp_udp_tcp.h"
 #include "enc28j60.h"
 #include "timeout.h"
 
-// set output to VCC, red LED off
-#define LEDOFF PORTC|=(1<<PC4)
-// set output to GND, red LED on
-#define LEDON PORTC&=~(1<<PC4)
+#define ETH_LEDON PORTC|=(1<<PC5)
+#define ETH_LEDOFF PORTC&=~(1<<PC5)
+
+#define ALARM_LEDON PORTC|=(1<<PC4)
+#define ALARM_LEDOFF PORTC&=~(1<<PC4)
 // to test the state of the LED
-#define LEDISOFF PORTC&(1<<PC4)
+#define ALARM_LEDISON PINC&(1<<PC4)
+
 
 // please modify the following two lines. mac and ip have to be unique
 // in your local area network. You can not have the same numbers in
@@ -45,6 +48,14 @@ uint16_t print_webpage(uint8_t *buf)
         plen=http200ok();
         plen=fill_tcp_data_p(buf,plen,PSTR("<pre>"));
         plen=fill_tcp_data_p(buf,plen,PSTR("Hi!\nYour web server works great."));
+		if (0 == ALARM_LEDISON)
+		{
+			plen=fill_tcp_data_p(buf,plen,PSTR("\n\nALARM IS OFf"));
+		}
+		else
+		{
+			plen=fill_tcp_data_p(buf,plen,PSTR("\n\nALARM IS ON"));
+		}						
         plen=fill_tcp_data_p(buf,plen,PSTR("</pre>\n"));
         return(plen);
 }
@@ -58,8 +69,8 @@ int main(void){
         CLKPR=(1<<CLKPCE);
         CLKPR=0; // 8 MHZ
         _delay_loop_1(0); // 60us
-        DDRC|= (1<<PC4); // LED, enable PC4, LED as output
-        LEDOFF;
+        DDRC|= (1<<PC4) | (1<<PC5); // LED pins
+        ETH_LEDOFF;
         
         //initialize the hardware driver for the enc28j60
         enc28j60Init(mymac);
@@ -70,7 +81,15 @@ int main(void){
         //init the ethernet/ip layer:
         init_udp_or_www_server(mymac,myip);
         www_server_port(MYWWWPORT);
-
+		
+		/* Configure interrupt for alarm pin (INT1)
+		 * which is normally pulled up, therefore INT
+		 * should fire on falling edge */
+		EICRA |= (1 << ISC11);
+		EIMSK |= (1 << INT1);
+		
+		// Enable interrupts
+		sei();
         while(1){
                 // read packet, handle ping and wait for a tcp packet:
                 dat_p=packetloop_arp_icmp_tcp(buf,enc28j60PacketReceive(BUFFER_SIZE, buf));
@@ -79,9 +98,9 @@ int main(void){
                 if(dat_p==0){
                         // no http request
                         if (enc28j60linkup()){
-                                LEDON;
+                                ETH_LEDON;
                         }else{
-                                LEDOFF;
+                                ETH_LEDOFF;
                         }
                         continue;
                 }
@@ -107,3 +126,7 @@ SENDTCP:
         return (0);
 }
 
+ISR(INT1_vect)
+{
+	ALARM_LEDON;
+}
