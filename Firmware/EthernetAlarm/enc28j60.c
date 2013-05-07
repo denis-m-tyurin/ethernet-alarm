@@ -2,15 +2,15 @@
  * vim:sw=8:ts=8:si:et
  * To use the above modeline in vim you must have "set modeline" in your .vimrc
  * Author: Guido Socher 
- * Copyright:LGPL V2
- * See http://www.gnu.org/licenses/old-licenses/lgpl-2.0.html
+ * Copyright: GPL V2
+ * http://www.gnu.org/licenses/gpl.html
  *
  * Based on the enc28j60.c file from the AVRlib library by Pascal Stang.
  * For AVRlib See http://www.procyonengineering.com/
  * Used with explicit permission of Pascal Stang.
  *
  * Title: Microchip ENC28J60 Ethernet Interface Driver
- * Chip type           : ATMEGA88/ATMEGA168/ATMEGA328/ATMEGA644 with ENC28J60
+ * Chip type           : ATMEGA88 with ENC28J60
  *********************************************/
 #include <avr/io.h>
 #include "enc28j60.h"
@@ -27,18 +27,10 @@ static uint8_t Enc28j60Bank;
 static int16_t gNextPacketPtr;
 #define ENC28J60_CONTROL_PORT   PORTB
 #define ENC28J60_CONTROL_DDR    DDRB
-#if defined(__AVR_ATmega88__) || defined(__AVR_ATmega88P__) || defined(__AVR_ATmega168__) || defined(__AVR_ATmega168P__) || defined(__AVR_ATmega328P__) 
-#define ENC28J60_CONTROL_CS PORTB2
+#define ENC28J60_CONTROL_CS     PORTB2
 #define ENC28J60_CONTROL_SO PORTB4
 #define ENC28J60_CONTROL_SI PORTB3
 #define ENC28J60_CONTROL_SCK PORTB5
-#endif
-#if defined(__AVR_ATmega644__)||defined(__AVR_ATmega644P__)
-#define ENC28J60_CONTROL_CS PORTB4
-#define ENC28J60_CONTROL_SO PORTB6
-#define ENC28J60_CONTROL_SI PORTB5
-#define ENC28J60_CONTROL_SCK PORTB7
-#endif
 // set CS to 0 = active
 #define CSACTIVE ENC28J60_CONTROL_PORT&=~(1<<ENC28J60_CONTROL_CS)
 // set CS to 1 = passive
@@ -134,18 +126,22 @@ uint8_t enc28j60Read(uint8_t address)
         return enc28j60ReadOp(ENC28J60_READ_CTRL_REG, address);
 }
 
-// read 16 bits
-uint16_t enc28j60PhyRead(uint8_t address)
+// read upper 8 bits
+uint16_t enc28j60PhyReadH(uint8_t address)
 {
+
 	// Set the right address and start the register read operation
 	enc28j60Write(MIREGADR, address);
 	enc28j60Write(MICMD, MICMD_MIIRD);
+        _delay_loop_1(40); // 10us
+
 	// wait until the PHY read completes
 	while(enc28j60Read(MISTAT) & MISTAT_BUSY);
+
 	// reset reading bit
 	enc28j60Write(MICMD, 0x00);
-        // get data value from MIRDL and MIRDH
-	return ((enc28j60Read(MIRDH)<<8)|enc28j60Read(MIRDL));
+	
+	return (enc28j60Read(MIRDH));
 }
 
 void enc28j60Write(uint8_t address, uint8_t data)
@@ -273,47 +269,14 @@ void enc28j60Init(uint8_t* macaddr)
 // read the revision of the chip:
 uint8_t enc28j60getrev(void)
 {
-        uint8_t rev;
-        rev=enc28j60Read(EREVID);
-        // microchip forgott to step the number on the silcon when they
-        // released the revision B7. 6 is now rev B7. We still have
-        // to see what they do when they release B8. At the moment
-        // there is no B8 out yet
-        if (rev>5) rev++;
-	return(rev);
-}
-
-// A number of utility functions to enable/disable broadcast 
-void enc28j60EnableBroadcast( void ) {
-        uint8_t erxfcon;
-        erxfcon=enc28j60Read(ERXFCON);
-        erxfcon |= ERXFCON_BCEN;
-        enc28j60Write(ERXFCON, erxfcon);
-}
-
-void enc28j60DisableBroadcast( void ) {
-        uint8_t erxfcon;
-        erxfcon=enc28j60Read(ERXFCON);
-        erxfcon &= (0xff ^ ERXFCON_BCEN);
-        enc28j60Write(ERXFCON, erxfcon);
+	return(enc28j60Read(EREVID));
 }
 
 // link status
 uint8_t enc28j60linkup(void)
 {
-        // PHSTAT1 LLSTAT (= bit 2 in lower reg), PHSTAT1_LLSTAT
-        // LLSTAT is latching, that is: if it was down since last
-        // calling enc28j60linkup then we get first a down indication
-        // and only at the next call to enc28j60linkup it will come up.
-        // This way we can detect intermittened link failures and
-        // that might be what we want.
-        // The non latching version is LSTAT.
-        // PHSTAT2 LSTAT (= bit 10 in upper reg)
-        if (enc28j60PhyRead(PHSTAT2) & (1<<10) ){
-        //if (enc28j60PhyRead(PHSTAT1) & PHSTAT1_LLSTAT){
-                return(1);
-        }
-        return(0);
+        // bit 10 (= bit 3 in upper reg)
+	return(enc28j60PhyReadH(PHSTAT2) && 4);
 }
 
 void enc28j60PacketSend(uint16_t len, uint8_t* packet)
@@ -360,7 +323,7 @@ uint16_t enc28j60PacketReceive(uint16_t maxlen, uint8_t* packet)
 	uint16_t rxstat;
 	uint16_t len;
 	// check if a packet has been received and buffered
-	//if( !(enc28j60Read(EIR) & EIR_PKTIF) )
+	//if( !(enc28j60Read(EIR) & EIR_PKTIF) ){
         // The above does not work. See Rev. B4 Silicon Errata point 6.
 	if( enc28j60Read(EPKTCNT) ==0 ){
 		return(0);
@@ -395,14 +358,13 @@ uint16_t enc28j60PacketReceive(uint16_t maxlen, uint8_t* packet)
         }
 	// Move the RX read pointer to the start of the next received packet
 	// This frees the memory we just read out
-	//enc28j60Write(ERXRDPTL, (gNextPacketPtr &0xFF));
-	//enc28j60Write(ERXRDPTH, (gNextPacketPtr)>>8);
-        //
+	enc28j60Write(ERXRDPTL, (gNextPacketPtr &0xFF));
+	enc28j60Write(ERXRDPTH, (gNextPacketPtr)>>8);
         // Move the RX read pointer to the start of the next received packet
-        // This frees the memory we just read out. 
-        // However, compensate for the errata point 13, rev B4: never write an even address!
-        // gNextPacketPtr is always an even address if RXSTOP_INIT is odd.
-        if (gNextPacketPtr -1 > RXSTOP_INIT){ // RXSTART_INIT is zero, no test for gNextPacketPtr less than RXSTART_INIT.
+        // This frees the memory we just read out.
+        // However, compensate for the errata point 13, rev B4: enver write an even address!
+        if ((gNextPacketPtr - 1 < RXSTART_INIT)
+                || (gNextPacketPtr -1 > RXSTOP_INIT)) {
                 enc28j60Write(ERXRDPTL, (RXSTOP_INIT)&0xFF);
                 enc28j60Write(ERXRDPTH, (RXSTOP_INIT)>>8);
         } else {

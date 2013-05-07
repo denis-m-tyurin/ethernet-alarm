@@ -1,0 +1,1 @@
+perl alarmsrv-basic.perl -l log.txt -c alarm_command_script -s sharedsec

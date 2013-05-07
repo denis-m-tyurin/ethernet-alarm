@@ -1,20 +1,18 @@
 /*****************************************************************************
- * vim:sw=8:ts=8:si:et
- *
- * Title      : Microchip ENC28J60 Ethernet Interface Driver
- * Author     : Pascal Stang 
- * Modified by: Guido Socher
- * Copyright:LGPL V2
- * See http://www.gnu.org/licenses/old-licenses/lgpl-2.0.html
- * Based on the enc28j60.c file from the AVRlib library by Pascal Stang.
- * For AVRlib See http://www.procyonengineering.com/
- * Used with explicit permission of Pascal Stang.
- *
- *This driver provides initialization and transmit/receive
- *functions for the Microchip ENC28J60 10Mb Ethernet Controller and PHY.
- *This chip is novel in that it is a full MAC+PHY interface all in a 28-pin
- *chip, using an SPI interface to the host processor.
- ****************************************************************************/
+* vim:sw=8:ts=8:si:et
+*
+* Title      : Microchip ENC28J60 Ethernet Interface Driver
+* Author     : Pascal Stang 
+* Modified by: Guido Socher
+* Copyright: GPL V2
+*
+*This driver provides initialization and transmit/receive
+*functions for the Microchip ENC28J60 10Mb Ethernet Controller and PHY.
+*This chip is novel in that it is a full MAC+PHY interface all in a 28-pin
+*chip, using an SPI interface to the host processor.
+*
+*
+*****************************************************************************/
 //@{
 
 
@@ -242,22 +240,22 @@
 #define ENC28J60_SOFT_RESET          0xFF
 
 
-// The RXSTART_INIT must be zero. See Rev. B4 Silicon Errata point 5.
-// Buffer boundaries applied to internal 8K ram
+// The RXSTART_INIT should be zero. See Rev. B4 Silicon Errata
+// buffer boundaries applied to internal 8K ram
 // the entire available packet buffer space is allocated
 //
-// start with recbuf at 0 (must be zero! assumed in code)
+// start with recbuf at 0/
 #define RXSTART_INIT     0x0
-// receive buffer end, must be odd number:
-#define RXSTOP_INIT      (0x1FFF-0x0600)
-// start TX buffer after RXSTOP_INIT with space for one full ethernet frame (~1500 bytes)
-#define TXSTART_INIT     (0x1FFF-0x0600+1)
+// receive buffer end
+#define RXSTOP_INIT      (0x1FFF-0x0600-1)
+// start TX buffer at 0x1FFF-0x0600, pace for one full ethernet frame (~1500 bytes)
+#define TXSTART_INIT     (0x1FFF-0x0600)
 // stp TX buffer at end of mem
 #define TXSTOP_INIT      0x1FFF
 //
 // max frame length which the conroller will accept:
-// (note: maximum ethernet frame length would be 1518)
-#define        MAX_FRAMELEN        1500        
+#define        MAX_FRAMELEN        1500        // (note: maximum ethernet frame length would be 1518)
+//#define MAX_FRAMELEN     600
 
 
 // functions
@@ -275,8 +273,6 @@ extern void enc28j60PacketSend(uint16_t len, uint8_t* packet);
 extern uint8_t enc28j60hasRxPkt(void);
 extern uint16_t enc28j60PacketReceive(uint16_t maxlen, uint8_t* packet);
 extern uint8_t enc28j60getrev(void);
-extern void enc28j60EnableBroadcast(void);
-extern void enc28j60DisableBroadcast(void);
 extern uint8_t enc28j60linkup(void);
 
 #endif
