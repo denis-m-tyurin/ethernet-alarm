@@ -16,6 +16,7 @@
 #include "enc28j60.h"
 #include "timeout.h"
 #include "net.h"
+#include "dhcp_client.h"
 
 //---------------- start of modify lines --------
 // please modify the following lines. mac and ip have to be unique
@@ -23,7 +24,10 @@
 // two devices:
 static uint8_t mymac[6] = {0x54,0x55,0x58,0x10,0x00,0x29};
 // how did I get the mac addr? Translate the first 3 numbers into ascii is: TUX
-static uint8_t myip[4] = {192,168,0,2};
+
+// My own IP (DHCP will provide a value for it):
+static uint8_t myip[4]={0,0,0,0};
+
 // listen port for tcp/www:
 #define MYWWWPORT 80
 // listen port for udp
@@ -37,11 +41,10 @@ static char myname[MYNAME_LEN+1]="section-42";
 // IP address of the alarm server to contact. The server we send the UDP to
 static uint8_t udpsrvip[4] = {192,168,0,1};
 static uint16_t udpsrvport=5151;
-// Default gateway. The ip address of your DSL router. It can be set to the same as
-// udpsrvip the case where there is no default GW/router to access the
-// server (=server is on the same lan as this host)
-static uint8_t gwip[4] = {192,168,0,1};
-//
+
+// Default gateway (DHCP will provide a value for it):
+static uint8_t gwip[4]={0,0,0,0};
+
 // the alarm contact is PD3.
 // ALCONTACTCLOSE=1 means: alarm when contact between GND and PD3 closed
 #define ALCONTACTCLOSE 1
@@ -62,6 +65,7 @@ static uint8_t lastAlarm=0; // indicates if we had an alarm or not
 // timing:
 static volatile uint8_t cnt2step=0;
 static volatile uint8_t gSec=0;
+static volatile uint8_t dhcp_tick_sec=0;
 static volatile uint16_t gMin=0; // alarm time min
 
 #define ETH_LEDON PORTC|=(1<<PC5)
@@ -229,8 +233,15 @@ ISR(TIMER2_COMPA_vect){
 	cnt2step++;
 	if (cnt2step>49){
 		gSec++;
+		dhcp_tick_sec++;
 		cnt2step=0;
 	}
+	
+	if (dhcp_tick_sec>5){
+		dhcp_tick_sec=0;
+		dhcp_6sec_tick();
+	}
+	
 	if (gSec>59){
 		gSec=0;
 		if (lastAlarm){
@@ -248,17 +259,16 @@ ISR(TIMER2_COMPA_vect){
 * You must call once sei() in the main program */
 void init_cnt2(void)
 {
-	cnt2step=0;
-	PRR&=~(1<<PRTIM2); // write power reduction register to zero
-	TIMSK2=(1<<OCIE2A); // compare match on OCR2A
-	TCNT2=0;  // init counter
-	OCR2A=244; // value to compare against
-	TCCR2A=(1<<WGM21); // do not change any output pin, clear at compare match
-	// divide clock by 1024: 12.5MHz/1024=12207.0313 Hz
-	TCCR2B=(1<<CS22)|(1<<CS21)|(1<<CS20); // clock divider, start counter
-	// 12207.0313 / 244= 50.0288
+		cnt2step=0;
+		PRR&=~(1<<PRTIM2); // write power reduction register to zero
+		TIMSK2=(1<<OCIE2A); // compare match on OCR2A
+		TCNT2=0;  // init counter
+		OCR2A=244; // value to compare against
+		TCCR2A=(1<<WGM21); // do not change any output pin, clear at compare match
+		// divide clock by 1024: 12.5MHz/1024=12207.0313 Hz
+		TCCR2B=(1<<CS22)|(1<<CS21)|(1<<CS20); // clock divider, start counter
+		// 12207.0313 / 244= 50.0288
 }
-
 
 #if 0
 // denis-m-tyurin: currently not used. the proto just polls the pin
@@ -284,6 +294,7 @@ int main(void){
 	int8_t cmd;
 	uint8_t payloadlen=0;
 	char cmdval;
+	uint8_t rval=0;
 	
 	// set the clock speed to "no pre-scaler" (8MHz with internal osc or
 	// full external speed)
@@ -314,25 +325,43 @@ int main(void){
 	//init the web server ethernet/ip layer:
 	init_udp_or_www_server(mymac,myip);
 	www_server_port(MYWWWPORT);
-	
-	//client_set_gwip(gwip);  // e.g internal IP of dsl router
 
-	
-#if 0
-		// denis-m-tyurin: currently not used. the proto just polls the pin
-		
-		/* Configure interrupt for alarm pin (INT1)
-		 * which is normally pulled up, therefore INT
-		 * should fire on falling edge */
-		EICRA |= (1 << ISC11);
-		EIMSK |= (1 << INT1);
-#endif	
+    ALARM_LEDON;
+    // DHCP handling. Get the initial IP    
+    init_mac(mymac);
+    while(rval==0)
+	{
+		gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
+	    buf[BUFFER_SIZE]='\0';
+	    rval=packetloop_dhcp_initial_ip_assignment(buf,gPlen,mymac[5]);
+    }
+    
+	// we have an IP:
+    dhcp_get_my_ip(myip,NULL,gwip);
+    client_ifconfig(myip,NULL);
+    
+	ALARM_LEDOFF;
+
+    if (gwip[0]==0)
+	{
+		// we must have a gateway returned from the dhcp server
+	    // otherwise this code will not work
+	    ALARM_LEDON; // error
+		ETH_LEDON;
+	    while(1); // stop here
+		// TODO: Kick watchdog here to prevent reset
+    }     
 
 	while(1){
-
+		
+		// TODO: Kick watchdog
+		
 		// handle ping and wait for a tcp/udp packet
 		gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
 		buf[BUFFER_SIZE]='\0';
+		
+		// DHCP renew IP:
+		gPlen=packetloop_dhcp_renewhandler(buf,gPlen); // for this to work you have to call dhcp_6sec_tick() every 6 sec
 
 		if (contact_debounce==0 && bit_is_clear(PIND,PD3)==ALCONTACTCLOSE){
 			// indicate an alarm and set the debounce counter

@@ -120,6 +120,12 @@
     </ToolchainSettings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="dhcp_client.c">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="dhcp_client.h">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="enc28j60.c">
       <SubType>compile</SubType>
     </Compile>
