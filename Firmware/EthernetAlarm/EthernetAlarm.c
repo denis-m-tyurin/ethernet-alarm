@@ -49,6 +49,10 @@ static uint8_t gwip[4] = {192,168,0,1};
 //#define ALCONTACTCLOSE 0
 //---------------- end of modify lines --------
 //
+#define TRANS_NUM_GWMAC 1
+static uint8_t gwmac[6];
+static int8_t gw_arp_state=0;
+
 #define BUFFER_SIZE 650
 static uint8_t buf[BUFFER_SIZE+1];
 static uint16_t gPlen;
@@ -87,6 +91,13 @@ uint16_t print_webpage_config(void)
 {
 	uint16_t plen;
 	plen=http200ok();
+	
+	// Check if gatewy MAC look-up has been already done
+	if (gw_arp_state==1)
+	{
+	        plen=fill_tcp_data_p(buf,plen,PSTR("waiting for GW MAC\n"));
+		    return(plen);
+	}
 	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/>[home]</a>"));
 	plen=fill_tcp_data_p(buf,plen,PSTR("<h2>Alarm config</h2><pre>\n"));
 	plen=fill_tcp_data_p(buf,plen,PSTR("<form action=/u method=get>"));
@@ -257,6 +268,15 @@ ISR(INT1_vect)
 }
 #endif
 
+// the __attribute__((unused)) is a gcc compiler directive to avoid warnings about unsed variables.
+void arpresolver_result_callback(uint8_t *ip __attribute__((unused)),uint8_t transaction_number,uint8_t *mac){
+	uint8_t i=0;
+	if (transaction_number==TRANS_NUM_GWMAC){
+		// copy mac address over:
+		while(i<6){gwmac[i]=mac[i];i++;}
+	}
+}
+
 int main(void){
 	uint16_t dat_p;
 	uint16_t contact_debounce=0;
@@ -292,8 +312,11 @@ int main(void){
 	DDRD&= ~(1<<PD3);
 	
 	//init the web server ethernet/ip layer:
-	init_ip_arp_udp_tcp(mymac,myip,MYWWWPORT);
-	client_set_gwip(gwip);  // e.g internal IP of dsl router
+	init_udp_or_www_server(mymac,myip);
+	www_server_port(MYWWWPORT);
+	
+	//client_set_gwip(gwip);  // e.g internal IP of dsl router
+
 	
 #if 0
 		// denis-m-tyurin: currently not used. the proto just polls the pin
@@ -322,35 +345,48 @@ int main(void){
 				ALARM_LEDON;
 			}
 		}
-		dat_p=packetloop_icmp_tcp(buf,gPlen);
+		dat_p=packetloop_arp_icmp_tcp(buf,gPlen);
 
 		if(dat_p==0){
 			// no pending packet
 			
-			if (enc28j60linkup())
-			{
-				ETH_LEDON;
-			}
-			else
-			{
-				ETH_LEDOFF;
-			}
-			
 			if (gPlen==0){
-				if (contact_debounce==DEBOUNCECOUNT){
+				if (enc28j60linkup() && 2==gw_arp_state)
+				{
+					ETH_LEDON;
+				}
+				else
+				{
+					ETH_LEDOFF;
+				}
+				if (contact_debounce==DEBOUNCECOUNT && 2==gw_arp_state){
 					// send a real alarm
 					strcpy(gStrbuf,"a=0:");
 					strcat(gStrbuf,password);
 					strcat(gStrbuf,", n=");
 					strcat(gStrbuf,myname);
 					strcat(gStrbuf,"\n");
-					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport);
+					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);					
 				}
 				if (contact_debounce){
 					contact_debounce--;
 					}else{
 					ALARM_LEDOFF;
 				}
+				
+				// we are idle here - look up GW MAC here
+				if (gw_arp_state==0)
+				{
+					// find the mac address of the gateway
+					get_mac_with_arp(gwip,TRANS_NUM_GWMAC,&arpresolver_result_callback);
+					gw_arp_state=1;
+				}
+				if (get_mac_with_arp_wait()==0 && gw_arp_state==1)
+				{
+					// done we have the mac address of the GW
+					gw_arp_state=2;
+				}
+				
 				continue;
 			}
 			// pending packet, check if udp otherwise continue
@@ -449,14 +485,14 @@ int main(void){
 			}
 			// a=t:secret
 			if (buf[UDP_DATA_P]=='a'){
-				if(cmdval=='t' && buf[UDP_DATA_P+3]==':' && verify_password((char *)&(buf[UDP_DATA_P+4]))){
+				if(2==gw_arp_state && cmdval=='t' && buf[UDP_DATA_P+3]==':' && verify_password((char *)&(buf[UDP_DATA_P+4]))){
 					// send a test alarm (an alarm the same way as if the real alarm triggered)
 					strcpy(gStrbuf,"a=t:");
 					strcat(gStrbuf,password);
 					strcat(gStrbuf,", n=");
 					strcat(gStrbuf,myname);
 					strcat(gStrbuf,"\n");
-					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport);
+					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);
 					continue;
 				}
 			}
