@@ -25,8 +25,8 @@
 static uint8_t mymac[6] = {0x54,0x55,0x58,0x10,0x00,0x29};
 // how did I get the mac addr? Translate the first 3 numbers into ascii is: TUX
 
-// My own IP (DHCP will provide a value for it):
-static uint8_t myip[4]={0,0,0,0};
+// My own IP (DHCP will provide a value for it if enabled):
+static uint8_t myip[4]={192,168,0,2};
 
 // listen port for tcp/www:
 #define MYWWWPORT 80
@@ -37,13 +37,13 @@ static char password[10]="sharedsec"; // must not be longer than 9 char
 // MYNAME_LEN must be smaller than gStrbuf (below):
 #define STR_BUFFER_SIZE 30
 #define MYNAME_LEN STR_BUFFER_SIZE-14
-static char myname[MYNAME_LEN+1]="section-42";
+static char myname[MYNAME_LEN+1]="ROOM_XXX";
 // IP address of the alarm server to contact. The server we send the UDP to
 static uint8_t udpsrvip[4] = {192,168,0,1};
 static uint16_t udpsrvport=5151;
 
-// Default gateway (DHCP will provide a value for it):
-static uint8_t gwip[4]={0,0,0,0};
+// Default gateway (DHCP will provide a value for it if enabled):
+static uint8_t gwip[4]={192,168,0,1};
 
 // the alarm contact is PD3.
 // ALCONTACTCLOSE=1 means: alarm when contact between GND and PD3 closed
@@ -54,19 +54,26 @@ static uint8_t gwip[4]={0,0,0,0};
 //
 #define TRANS_NUM_GWMAC 1
 static uint8_t gwmac[6];
-static int8_t gw_arp_state=0;
+static uint8_t gw_arp_state=0;
+static uint16_t heartbeat_timeout_sec=10; // TODO add it to settings
+static volatile uint16_t heartbeat_counter=0; 
+static uint8_t dhcpOn=1;
 
 #define BUFFER_SIZE 650
 static uint8_t buf[BUFFER_SIZE+1];
 static uint16_t gPlen;
 static char gStrbuf[STR_BUFFER_SIZE+1];
 static uint8_t alarmOn=1; // alarm system is on or off
+
 static uint8_t lastAlarm=0; // indicates if we had an alarm or not
 // timing:
 static volatile uint8_t cnt2step=0;
 static volatile uint8_t gSec=0;
 static volatile uint8_t dhcp_tick_sec=0;
 static volatile uint16_t gMin=0; // alarm time min
+
+static volatile uint8_t flash_eth_led_ctr=0;
+static volatile uint8_t flash_alarm_led_ctr=0;
 
 #define ETH_LEDON PORTC|=(1<<PC5)
 #define ETH_LEDOFF PORTC&=~(1<<PC5)
@@ -91,7 +98,7 @@ uint16_t http200ok(void)
 	return(fill_tcp_data_p(buf,0,PSTR("HTTP/1.0 200 OK\r\nContent-Type: text/html\r\nPragma: no-cache\r\n\r\n")));
 }
 
-uint16_t print_webpage_config(void)
+uint16_t print_alarm_config(void)
 {
 	uint16_t plen;
 	plen=http200ok();
@@ -117,10 +124,42 @@ uint16_t print_webpage_config(void)
 	plen=fill_tcp_data_p(buf,plen,PSTR("> port=<input type=text name=dp size=4 value="));
 	itoa(udpsrvport,gStrbuf,10);
 	plen=fill_tcp_data(buf,plen,gStrbuf);
-	plen=fill_tcp_data_p(buf,plen,PSTR("> gwip=<input type=text name=gi value="));
+	plen=fill_tcp_data_p(buf,plen,PSTR(">\nPasswd: <input type=password name=pw>\n"));
+	
+	plen=fill_tcp_data_p(buf,plen,PSTR("<input type=submit value=change></form>\n<hr>"));
+	return(plen);
+}
+
+uint16_t print_net_config(void)
+{
+	uint16_t plen;
+	plen=http200ok();
+	
+	// Check if gatewy MAC look-up has been already done
+	if (gw_arp_state==1)
+	{
+		plen=fill_tcp_data_p(buf,plen,PSTR("waiting for GW MAC\n"));
+		return(plen);
+	}
+	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/>[home]</a>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("<h2>Network config</h2><pre>\n"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("<form action=/u method=get>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("DHCP:<input type=checkbox value=1 name=dh "));
+	if (dhcpOn){
+		plen=fill_tcp_data_p(buf,plen,PSTR("checked"));
+	}
+	plen=fill_tcp_data_p(buf,plen,PSTR(">\nIP=<input type=text name=ip value="));
+	mk_net_str(gStrbuf,myip,4,'.',10);
+	plen=fill_tcp_data(buf,plen,gStrbuf);
+	plen=fill_tcp_data_p(buf,plen,PSTR(">\ngwip=<input type=text name=gi value="));
 	mk_net_str(gStrbuf,gwip,4,'.',10);
 	plen=fill_tcp_data(buf,plen,gStrbuf);
-	plen=fill_tcp_data_p(buf,plen,PSTR(">\nPasswd: <input type=password name=pw>\n<input type=submit value=change></form>\n<hr>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR(">\nHeartbeat timeout=<input type=text name=hb value="));
+	itoa(heartbeat_timeout_sec,gStrbuf,10);
+	plen=fill_tcp_data(buf,plen,gStrbuf);
+	plen=fill_tcp_data_p(buf,plen,PSTR(">\nPasswd: <input type=password name=pw>\n"));
+	
+	plen=fill_tcp_data_p(buf,plen,PSTR("<input type=submit value=change></form>\n<hr>"));
 	return(plen);
 }
 
@@ -129,7 +168,7 @@ uint16_t print_webpage(void)
 {
 	uint16_t plen;
 	plen=http200ok();
-	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[config]</a> <a href=./>[refresh]</a>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[alarm config]</a> <a href=/n>[network config]</a> <a href=./>[refresh]</a>"));
 	plen=fill_tcp_data_p(buf,plen,PSTR("<h2>Alarm: "));
 	plen=fill_tcp_data(buf,plen,myname);
 	plen=fill_tcp_data_p(buf,plen,PSTR("</h2><pre>\n"));
@@ -157,7 +196,10 @@ void data2eeprom(void)
 	eeprom_write_block((uint8_t *)udpsrvip,(void *)45,sizeof(udpsrvip));
 	eeprom_write_word((void *)49,udpsrvport);
 	eeprom_write_byte((uint8_t *)51,alarmOn);
-	eeprom_write_block((uint8_t *)myname,(void *)52,sizeof(myname));
+	eeprom_write_word((void *)52,heartbeat_timeout_sec);
+	eeprom_write_byte((uint8_t *)54,dhcpOn);
+	eeprom_write_block((uint8_t *)myip,(void *)55,sizeof(myip));
+	eeprom_write_block((uint8_t *)myname,(void *)59,sizeof(myname));	
 }
 
 void eeprom2data(void)
@@ -168,7 +210,10 @@ void eeprom2data(void)
 		eeprom_read_block((uint8_t *)udpsrvip,(void *)45,sizeof(udpsrvip));
 		udpsrvport=eeprom_read_word((void *)49);
 		alarmOn=eeprom_read_byte((uint8_t *)51);
-		eeprom_read_block((char *)myname,(void *)52,sizeof(myname));
+		heartbeat_timeout_sec=eeprom_read_word((void *)52);
+		dhcpOn=eeprom_read_byte((uint8_t *)54);
+		eeprom_read_block((uint8_t *)myip,(void *)55,sizeof(myip));
+		eeprom_read_block((char *)myname,(void *)59,sizeof(myname));
 	}
 }
 
@@ -181,9 +226,14 @@ int8_t analyse_get_url(char *str)
 	// the first slash:
 	if (*str == 'c'){
 		// configpage:
-		gPlen=print_webpage_config();
+		gPlen=print_alarm_config();
 		return(10);
 	}
+	if (*str == 'n'){
+		// configpage:
+		gPlen=print_net_config();
+		return(10);
+	}	
 	if (*str == 'u'){
 		if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"pw")){
 			urldecode(gStrbuf);
@@ -198,6 +248,11 @@ int8_t analyse_get_url(char *str)
 					}else{
 					alarmOn=0;
 				}
+				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"dh")){
+					dhcpOn=1;
+					}else{
+					dhcpOn=0;
+				}				
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"di")){
 					urldecode(gStrbuf);
 					if (parse_ip(udpsrvip,gStrbuf)!=0){
@@ -208,9 +263,19 @@ int8_t analyse_get_url(char *str)
 					gStrbuf[4]='\0';
 					udpsrvport=atoi(gStrbuf);
 				}
+				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"hb")){
+					gStrbuf[4]='\0';
+					heartbeat_timeout_sec=atoi(gStrbuf);
+				}
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"gi")){
 					urldecode(gStrbuf);
 					if (parse_ip(gwip,gStrbuf)!=0){
+						return(-2);
+					}
+				}
+				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"ip")){
+					urldecode(gStrbuf);
+					if (parse_ip(myip,gStrbuf)!=0){
 						return(-2);
 					}
 				}
@@ -234,6 +299,7 @@ ISR(TIMER2_COMPA_vect){
 	if (cnt2step>49){
 		gSec++;
 		dhcp_tick_sec++;
+		heartbeat_counter++;
 		cnt2step=0;
 	}
 	
@@ -251,6 +317,25 @@ ISR(TIMER2_COMPA_vect){
 				gMin=0;
 				lastAlarm=0; // reset lastAlarm
 			}
+		}
+	}
+	
+	// Handle flashing status LEDs
+	if (flash_eth_led_ctr > 0)
+	{
+		flash_eth_led_ctr--;
+		if (flash_eth_led_ctr == 0)
+		{
+			ETH_LEDOFF;
+		}
+	}
+
+	if (flash_alarm_led_ctr > 0)
+	{
+		flash_alarm_led_ctr--;
+		if (flash_alarm_led_ctr == 0)
+		{
+			ALARM_LEDOFF;
 		}
 	}
 }
@@ -326,31 +411,34 @@ int main(void){
 	init_udp_or_www_server(mymac,myip);
 	www_server_port(MYWWWPORT);
 
-    ALARM_LEDON;
-    // DHCP handling. Get the initial IP    
-    init_mac(mymac);
-    while(rval==0)
+	if (dhcpOn)
 	{
-		gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
-	    buf[BUFFER_SIZE]='\0';
-	    rval=packetloop_dhcp_initial_ip_assignment(buf,gPlen,mymac[5]);
-    }
+		ALARM_LEDON;
+		// DHCP handling. Get the initial IP    
+		init_mac(mymac);
+		while(rval==0)
+		{
+			gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
+			buf[BUFFER_SIZE]='\0';
+			rval=packetloop_dhcp_initial_ip_assignment(buf,gPlen,mymac[5]);
+		}
     
-	// we have an IP:
-    dhcp_get_my_ip(myip,NULL,gwip);
-    client_ifconfig(myip,NULL);
+		// we have an IP:
+		dhcp_get_my_ip(myip,NULL,gwip);
+		client_ifconfig(myip,NULL);
     
-	ALARM_LEDOFF;
+		ALARM_LEDOFF;
 
-    if (gwip[0]==0)
-	{
-		// we must have a gateway returned from the dhcp server
-	    // otherwise this code will not work
-	    ALARM_LEDON; // error
-		ETH_LEDON;
-	    while(1); // stop here
-		// TODO: Kick watchdog here to prevent reset
-    }     
+		if (gwip[0]==0)
+		{
+			// we must have a gateway returned from the dhcp server
+			// otherwise this code will not work
+			ALARM_LEDON; // error
+			ETH_LEDON;
+			while(1); // stop here
+			// TODO: Kick watchdog here to prevent reset
+		}     
+	}
 
 	while(1){
 		
@@ -380,14 +468,12 @@ int main(void){
 			// no pending packet
 			
 			if (gPlen==0){
-				if (enc28j60linkup() && 2==gw_arp_state)
+				if (!enc28j60linkup() || 2 != gw_arp_state)
 				{
-					ETH_LEDON;
+					flash_alarm_led_ctr=1;
+					ALARM_LEDON;
 				}
-				else
-				{
-					ETH_LEDOFF;
-				}
+
 				if (contact_debounce==DEBOUNCECOUNT && 2==gw_arp_state){
 					// send a real alarm
 					strcpy(gStrbuf,"a=0:");
@@ -414,6 +500,16 @@ int main(void){
 				{
 					// done we have the mac address of the GW
 					gw_arp_state=2;
+				}
+				
+				// Post heartbeat message if the counter expires
+				if (heartbeat_counter >= heartbeat_timeout_sec && 2==gw_arp_state)
+				{
+					heartbeat_counter = 0;
+					snprintf(gStrbuf, STR_BUFFER_SIZE, "hb:n=%s\n", myname);
+					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);
+					ETH_LEDON;
+					flash_eth_led_ctr=1;
 				}
 				
 				continue;

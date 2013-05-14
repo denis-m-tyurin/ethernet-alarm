@@ -45,6 +45,8 @@ if ($opt_c && $opt_s && $opt_l){
             logmsg($opt_l,"OK $today, alarm, running $opt_c alarm \"$name\"\n");
             print  `$opt_c alarm \"$name\" 2>&1`;
             next;
+        } else {
+        	print $msg;
         }
     } 
     die "recv: $!";
@@ -56,6 +58,7 @@ sub logmsg($$){
     my $txt=shift;
     open(LF,">>$lf")|| die "ERROR: can not write to $lf\n";
     print LF $txt;
+    print $txt;
     close LF;
 }
 sub today(){
