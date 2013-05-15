@@ -8,6 +8,7 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <avr/pgmspace.h>
 #include <avr/eeprom.h>
@@ -244,14 +245,16 @@ int8_t analyse_get_url(char *str)
 					strcpy(myname,gStrbuf);
 				}
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"ae")){
-					alarmOn=1;
-					}else{
-					alarmOn=0;
+					// TODO: rework here cause alarm settings is on the separate page now
+					//alarmOn=1;
+					//}else{
+					//alarmOn=0;
 				}
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"dh")){
-					dhcpOn=1;
-					}else{
-					dhcpOn=0;
+					// TODO: rework here cause net settings is on the separate page now
+					//dhcpOn=1;
+					//}else{
+					//dhcpOn=0;
 				}				
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"di")){
 					urldecode(gStrbuf);
