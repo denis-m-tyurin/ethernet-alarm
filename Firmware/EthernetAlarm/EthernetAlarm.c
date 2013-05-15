@@ -7,6 +7,8 @@
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <avr/wdt.h>
+#include <avr/sleep.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -31,8 +33,6 @@ static uint8_t myip[4]={192,168,0,2};
 
 // listen port for tcp/www:
 #define MYWWWPORT 80
-// listen port for udp
-#define MYUDPPORT 1200
 // the password string (only a-z,0-9,_ characters):
 static char password[10]="sharedsec"; // must not be longer than 9 char
 // MYNAME_LEN must be smaller than gStrbuf (below):
@@ -244,22 +244,19 @@ int8_t analyse_get_url(char *str)
 					gStrbuf[MYNAME_LEN]='\0';
 					strcpy(myname,gStrbuf);
 				}
-				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"ae")){
-					// TODO: rework here cause alarm settings is on the separate page now
-					//alarmOn=1;
-					//}else{
-					//alarmOn=0;
-				}
-				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"dh")){
-					// TODO: rework here cause net settings is on the separate page now
-					//dhcpOn=1;
-					//}else{
-					//dhcpOn=0;
-				}				
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"di")){
 					urldecode(gStrbuf);
 					if (parse_ip(udpsrvip,gStrbuf)!=0){
 						return(-2);
+					}					
+					
+					// we've found destip, which means this is update from the
+					// alarm conf page (this is a mandatory field)
+					// Check alarm check box here
+					if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"ae")){
+						alarmOn=1;
+					}else{
+						alarmOn=0;
 					}
 				}
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"dp")){
@@ -269,6 +266,15 @@ int8_t analyse_get_url(char *str)
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"hb")){
 					gStrbuf[4]='\0';
 					heartbeat_timeout_sec=atoi(gStrbuf);
+					
+					// we've found heartbeat, which means this is update from the
+					// network conf page
+					// Check dhcp check box here
+					if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"dh")){
+						dhcpOn=1;
+					}else{
+						dhcpOn=0;
+					}		
 				}
 				if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"gi")){
 					urldecode(gStrbuf);
@@ -358,14 +364,6 @@ void init_cnt2(void)
 		// 12207.0313 / 244= 50.0288
 }
 
-#if 0
-// denis-m-tyurin: currently not used. the proto just polls the pin
-ISR(INT1_vect)
-{
-	ALARM_LEDON;
-}
-#endif
-
 // the __attribute__((unused)) is a gcc compiler directive to avoid warnings about unsed variables.
 void arpresolver_result_callback(uint8_t *ip __attribute__((unused)),uint8_t transaction_number,uint8_t *mac){
 	uint8_t i=0;
@@ -381,8 +379,10 @@ int main(void){
 	#define DEBOUNCECOUNT 0x1FFF
 	int8_t cmd;
 	uint8_t payloadlen=0;
-	char cmdval;
 	uint8_t rval=0;
+	
+	// Disable wathcdog as it might be still enabled after reset
+	wdt_disable();
 	
 	// set the clock speed to "no pre-scaler" (8MHz with internal osc or
 	// full external speed)
@@ -408,7 +408,7 @@ int main(void){
 	sei();
 
 	// enable PD3 as input for the alarms system:
-	DDRD&= ~(1<<PD3);
+	DDRD &= ~(1<<PD3);
 	
 	//init the web server ethernet/ip layer:
 	init_udp_or_www_server(mymac,myip);
@@ -438,16 +438,27 @@ int main(void){
 			// otherwise this code will not work
 			ALARM_LEDON; // error
 			ETH_LEDON;
-			while(1); // stop here
-			// TODO: Kick watchdog here to prevent reset
-		}     
+			while(1); // stop here			
+		}
+		
+		// arm watchdog
+		wdt_reset();
+		wdt_enable(WDTO_2S);
+		
+		// a bit of power save stuff
+		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // use power save mode to keep T2 running (see datasheet)
+		sleep_enable();
+		
+		// Disable clocks for unused peripherals
+		PRR |= (1 << PRTWI) | (1 << PRTIM0) | (1 << PRTIM1) | (1 << PRUSART0) | (1 << PRADC);
 	}
 
 	while(1){
 		
-		// TODO: Kick watchdog
+		// Kick watchdog, otherwise device will reset in 2 seconds
+		wdt_reset();
 		
-		// handle ping and wait for a tcp/udp packet
+		// handle ping and wait for a tcp packet
 		gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
 		buf[BUFFER_SIZE]='\0';
 		
@@ -468,9 +479,13 @@ int main(void){
 		dat_p=packetloop_arp_icmp_tcp(buf,gPlen);
 
 		if(dat_p==0){
-			// no pending packet
+						
+			// dat_p==0 && gPlen!=0 means UDP messages, which are just ignored
 			
 			if (gPlen==0){
+				
+				// no pending TCP packet
+				
 				if (!enc28j60linkup() || 2 != gw_arp_state)
 				{
 					flash_alarm_led_ctr=1;
@@ -484,7 +499,7 @@ int main(void){
 					strcat(gStrbuf,", n=");
 					strcat(gStrbuf,myname);
 					strcat(gStrbuf,"\n");
-					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);					
+					send_udp(buf,gStrbuf,strlen(gStrbuf),udpsrvport, udpsrvip, udpsrvport, gwmac);					
 				}
 				if (contact_debounce){
 					contact_debounce--;
@@ -492,7 +507,7 @@ int main(void){
 					ALARM_LEDOFF;
 				}
 				
-				// we are idle here - look up GW MAC here
+				// we are idle here - look up GW MAC
 				if (gw_arp_state==0)
 				{
 					// find the mac address of the gateway
@@ -510,133 +525,59 @@ int main(void){
 				{
 					heartbeat_counter = 0;
 					snprintf(gStrbuf, STR_BUFFER_SIZE, "hb:n=%s\n", myname);
-					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);
+					send_udp(buf,gStrbuf,strlen(gStrbuf),udpsrvport, udpsrvip, udpsrvport, gwmac);
 					ETH_LEDON;
 					flash_eth_led_ctr=1;
 				}
 				
 				continue;
 			}
-			// pending packet, check if udp otherwise continue
-			goto UDP;
 		}
-		if (strncmp("GET ",(char *)&(buf[dat_p]),4)!=0){
-			// head, post and other methods:
-			//
+		
+		do {
+			// Coming here means we've got valid TCP message
+			if (strncmp("GET ",(char *)&(buf[dat_p]),4)!=0){
+				// head, post and other methods:
+				//
+				// for possible status codes see:
+				// http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
+				gPlen=http200ok();
+				gPlen=fill_tcp_data_p(buf,gPlen,PSTR("<h1>200 OK</h1>"));
+				break;
+			}
+			// Cut the size for security reasons. If we are almost at the
+			// end of the buffer then there is a zero but normally there is
+			// a lot of room and we can cut down the processing time as
+			// correct URLs should be short in our case. If dat_p is already
+			// close to the end then the buffer is terminated already.
+			if ((dat_p+100) < BUFFER_SIZE){
+				buf[dat_p+100]='\0';
+			}
+
+			// start after the first slash:
+			cmd=analyse_get_url((char *)&(buf[dat_p+5]));
 			// for possible status codes see:
 			// http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
-			gPlen=http200ok();
-			gPlen=fill_tcp_data_p(buf,gPlen,PSTR("<h1>200 OK</h1>"));
-			goto SENDTCP;
-		}
-		// Cut the size for security reasons. If we are almost at the
-		// end of the buffer then there is a zero but normally there is
-		// a lot of room and we can cut down the processing time as
-		// correct URLs should be short in our case. If dat_p is already
-		// close to the end then the buffer is terminated already.
-		if ((dat_p+100) < BUFFER_SIZE){
-			buf[dat_p+100]='\0';
-		}
-		if (strncmp("/favicon.ico",(char *)&(buf[dat_p+4]),12)==0){
-			// favicon:
-			gPlen=fill_tcp_data_p(buf,0,PSTR("HTTP/1.0 301 Moved Permanently\r\nLocation: "));
-			gPlen=fill_tcp_data_p(buf,gPlen,PSTR("http://tuxgraphics.org/ico/a.ico"));
-			gPlen=fill_tcp_data_p(buf,gPlen,PSTR("\r\n\r\nContent-Type: text/html\r\n\r\n"));
-			gPlen=fill_tcp_data_p(buf,gPlen,PSTR("<h1>301 Moved Permanently</h1>\n"));
-			goto SENDTCP;
-		}
-		// start after the first slash:
-		cmd=analyse_get_url((char *)&(buf[dat_p+5]));
-		// for possible status codes see:
-		// http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
-		if (cmd==-1){
-			gPlen=fill_tcp_data_p(buf,0,PSTR("HTTP/1.0 401 Unauthorized\r\nContent-Type: text/html\r\n\r\n<h1>401 Unauthorized</h1>"));
-			goto SENDTCP;
-		}
-		if (cmd==-2){
-			gPlen=http200ok();
-			gPlen=fill_tcp_data_p(buf,gPlen,PSTR("<h1>ERROR in IP or port number</h1>"));
-			goto SENDTCP;
-		}
-		if (cmd==10){
-			// gPlen is already set
-			goto SENDTCP;
-		}
-		// the main page:
-		gPlen=print_webpage();
-		//
-		SENDTCP:
+			if (cmd==-1){
+				gPlen=fill_tcp_data_p(buf,0,PSTR("HTTP/1.0 401 Unauthorized\r\nContent-Type: text/html\r\n\r\n<h1>401 Unauthorized</h1>"));
+				break;
+			}
+			if (cmd==-2){
+				gPlen=http200ok();
+				gPlen=fill_tcp_data_p(buf,gPlen,PSTR("<h1>ERROR in IP or port number</h1>"));
+				break;
+			}
+			if (cmd==10){
+				// gPlen is already set
+				break;
+			}
+			// the main page:
+			gPlen=print_webpage();
+		} while (0);		
 		www_server_reply(buf,gPlen); // send data
-		continue;
-
-		// tcp port www end
-		// -------------------------------
-		// udp start, we listen on udp port 1200=0x4B0
-		UDP:
-		// check if ip packets are for us:
-		if(eth_type_is_ip_and_my_ip(buf,gPlen)==0){
-			continue;
-		}
-		if (buf[IP_PROTO_P]==IP_PROTO_UDP_V&&buf[UDP_DST_PORT_H_P]==(MYUDPPORT>>8)&&buf[UDP_DST_PORT_L_P]==(MYUDPPORT&0xff)){
-			payloadlen=buf[UDP_LEN_L_P]-UDP_HEADER_LEN;
-			if (payloadlen>10){
-				payloadlen=10;
-			}
-			// The start of the string is &(buf[UDP_DATA_P])
-			if (payloadlen<3 || buf[UDP_DATA_P+1]!='='){
-				continue; // do not send anything
-				//strcpy(gStrbuf,"e=nocmd\n");
-				//goto ANSWER;
-			}
-			cmdval=buf[UDP_DATA_P+2];
-			// supported commands are:
-			// s=?  // get status
-			// n=?  // get system name
-			// a=t  // trigger a test alarm
-			if (buf[UDP_DATA_P]=='s'){
-				if(cmdval=='?'){
-					if (alarmOn==0){
-						strcpy(gStrbuf,"a=off\n");
-						goto ANSWER;
-					}
-					if (lastAlarm){
-						strcpy(gStrbuf,"a=");
-						itoa(gMin,&(gStrbuf[2]),10);
-						strcat(gStrbuf,"\n");
-						goto ANSWER;
-					}
-					strcpy(gStrbuf,"a=none\n");
-					goto ANSWER;
-				}
-				strcpy(gStrbuf,"e=noarg\n");
-				goto ANSWER;
-			}
-			// a=t:secret
-			if (buf[UDP_DATA_P]=='a'){
-				if(2==gw_arp_state && cmdval=='t' && buf[UDP_DATA_P+3]==':' && verify_password((char *)&(buf[UDP_DATA_P+4]))){
-					// send a test alarm (an alarm the same way as if the real alarm triggered)
-					strcpy(gStrbuf,"a=t:");
-					strcat(gStrbuf,password);
-					strcat(gStrbuf,", n=");
-					strcat(gStrbuf,myname);
-					strcat(gStrbuf,"\n");
-					send_udp(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT, udpsrvip, udpsrvport, gwmac);
-					continue;
-				}
-			}
-			if (buf[UDP_DATA_P]=='n'){
-				cmdval=buf[UDP_DATA_P+2];
-				if(cmdval=='?'){
-					strcpy(gStrbuf,"n=");
-					strcat(gStrbuf,myname);
-					strcat(gStrbuf,"\n");
-					goto ANSWER;
-				}
-			}
-			strcpy(gStrbuf,"e=use: s=?,n=?,a=t:secret\n");
-			ANSWER:
-			make_udp_reply_from_request(buf,gStrbuf,strlen(gStrbuf),MYUDPPORT);
-		}
+		
+		// Going to sleep mode. MCU will wake up by timer2 interrupt
+		sleep_cpu();
 	}
 	return (0);
 }

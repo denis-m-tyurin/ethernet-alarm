@@ -20,7 +20,7 @@
 // a spontanious sending UDP client (needed as well for DNS and DHCP)
 #define UDP_client
 // a server answering to UDP messages
-#define UDP_server
+#undef UDP_server
 // a web server 
 #define WWW_server
 
