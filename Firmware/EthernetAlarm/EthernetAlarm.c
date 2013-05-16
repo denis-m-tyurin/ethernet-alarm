@@ -46,19 +46,25 @@ static uint16_t udpsrvport=5151;
 // Default gateway (DHCP will provide a value for it if enabled):
 static uint8_t gwip[4]={192,168,0,1};
 
-// the alarm contact is PD3.
-// ALCONTACTCLOSE=1 means: alarm when contact between GND and PD3 closed
-#define ALCONTACTCLOSE 1
-// alarm when contact between PD3 and GND is open
-//#define ALCONTACTCLOSE 0
 //---------------- end of modify lines --------
 //
 #define TRANS_NUM_GWMAC 1
+
+typedef enum
+{
+	GW_ARP_STATE_NOT_INITIALIZED = 0,
+	GW_ARP_STATE_IN_PROGRESS,
+	GW_ARP_STATE_READY
+	
+} GW_ARP_STATES_T;
+
 static uint8_t gwmac[6];
-static uint8_t gw_arp_state=0;
-static uint16_t heartbeat_timeout_sec=10; // TODO add it to settings
+static uint8_t gw_arp_state=GW_ARP_STATE_NOT_INITIALIZED;
+static uint16_t heartbeat_timeout_sec=10;
 static volatile uint16_t heartbeat_counter=0; 
 static uint8_t dhcpOn=1;
+
+static uint8_t alarmInt=0; // Armed by interrupt from PD3 pin
 
 #define BUFFER_SIZE 650
 static uint8_t buf[BUFFER_SIZE+1];
@@ -105,7 +111,7 @@ uint16_t print_alarm_config(void)
 	plen=http200ok();
 	
 	// Check if gatewy MAC look-up has been already done
-	if (gw_arp_state==1)
+	if (gw_arp_state==GW_ARP_STATE_IN_PROGRESS)
 	{
 	        plen=fill_tcp_data_p(buf,plen,PSTR("waiting for GW MAC\n"));
 		    return(plen);
@@ -137,7 +143,7 @@ uint16_t print_net_config(void)
 	plen=http200ok();
 	
 	// Check if gatewy MAC look-up has been already done
-	if (gw_arp_state==1)
+	if (gw_arp_state==GW_ARP_STATE_IN_PROGRESS)
 	{
 		plen=fill_tcp_data_p(buf,plen,PSTR("waiting for GW MAC\n"));
 		return(plen);
@@ -312,7 +318,7 @@ ISR(TIMER2_COMPA_vect){
 		cnt2step=0;
 	}
 	
-	if (dhcp_tick_sec>5){
+	if (dhcpOn && dhcp_tick_sec>5){
 		dhcp_tick_sec=0;
 		dhcp_6sec_tick();
 	}
@@ -347,6 +353,11 @@ ISR(TIMER2_COMPA_vect){
 			ALARM_LEDOFF;
 		}
 	}
+}
+
+ISR(INT1_vect)
+{
+	alarmInt = 1;
 }
 
 /* setup timer T2 as an interrupt generating time base.
@@ -407,9 +418,6 @@ int main(void){
 	init_cnt2();
 	sei();
 
-	// enable PD3 as input for the alarms system:
-	DDRD &= ~(1<<PD3);
-	
 	//init the web server ethernet/ip layer:
 	init_udp_or_www_server(mymac,myip);
 	www_server_port(MYWWWPORT);
@@ -440,18 +448,24 @@ int main(void){
 			ETH_LEDON;
 			while(1); // stop here			
 		}
-		
-		// arm watchdog
-		wdt_reset();
-		wdt_enable(WDTO_2S);
-		
-		// a bit of power save stuff
-		set_sleep_mode(SLEEP_MODE_PWR_SAVE); // use power save mode to keep T2 running (see datasheet)
-		sleep_enable();
-		
-		// Disable clocks for unused peripherals
-		PRR |= (1 << PRTWI) | (1 << PRTIM0) | (1 << PRTIM1) | (1 << PRUSART0) | (1 << PRADC);
 	}
+	
+	// arm watchdog
+	wdt_reset();
+	wdt_enable(WDTO_2S);
+		
+	// a bit of power save stuff
+	set_sleep_mode(SLEEP_MODE_PWR_SAVE); // use power save mode to keep T2 running (see datasheet)
+	sleep_enable();
+		
+	// Disable clocks for unused peripherals
+	PRR |= (1 << PRTWI) | (1 << PRTIM0) | (1 << PRTIM1) | (1 << PRUSART0) | (1 << PRADC);
+	
+	/* Configure interrupt for alarm pin (INT1)
+	* which is normally pulled up, therefore INT
+	* should fire on falling edge */
+	EICRA |= (1 << ISC11);
+	EIMSK |= (1 << INT1);
 
 	while(1){
 		
@@ -462,20 +476,12 @@ int main(void){
 		gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
 		buf[BUFFER_SIZE]='\0';
 		
-		// DHCP renew IP:
-		gPlen=packetloop_dhcp_renewhandler(buf,gPlen); // for this to work you have to call dhcp_6sec_tick() every 6 sec
-
-		if (contact_debounce==0 && bit_is_clear(PIND,PD3)==ALCONTACTCLOSE){
-			// indicate an alarm and set the debounce counter
-			// to not trigger multiple alarms at bouncing contacts
-			if (alarmOn){
-				contact_debounce=DEBOUNCECOUNT;
-				gSec=0;
-				gMin=0;
-				lastAlarm=1;
-				ALARM_LEDON;
-			}
-		}
+		if (dhcpOn)
+		{
+			// DHCP renew IP:
+			gPlen=packetloop_dhcp_renewhandler(buf,gPlen); // for this to work you have to call dhcp_6sec_tick() every 6 sec	
+		}		
+		
 		dat_p=packetloop_arp_icmp_tcp(buf,gPlen);
 
 		if(dat_p==0){
@@ -486,42 +492,64 @@ int main(void){
 				
 				// no pending TCP packet
 				
-				if (!enc28j60linkup() || 2 != gw_arp_state)
+				if (!enc28j60linkup() || GW_ARP_STATE_READY != gw_arp_state)
 				{
 					flash_alarm_led_ctr=1;
 					ALARM_LEDON;
 				}
 
-				if (contact_debounce==DEBOUNCECOUNT && 2==gw_arp_state){
-					// send a real alarm
-					strcpy(gStrbuf,"a=0:");
-					strcat(gStrbuf,password);
-					strcat(gStrbuf,", n=");
-					strcat(gStrbuf,myname);
-					strcat(gStrbuf,"\n");
-					send_udp(buf,gStrbuf,strlen(gStrbuf),udpsrvport, udpsrvip, udpsrvport, gwmac);					
-				}
-				if (contact_debounce){
-					contact_debounce--;
-					}else{
-					ALARM_LEDOFF;
+				if (contact_debounce==0 && alarmInt)
+				{
+					// indicate an alarm and set the debounce counter
+					// to not trigger multiple alarms at bouncing contacts
+					if (alarmOn)
+					{
+						contact_debounce=DEBOUNCECOUNT;
+						gSec=0;
+						gMin=0;
+						lastAlarm=1;
+						ALARM_LEDON;
+		
+						// Send alarm message to the server
+						if (GW_ARP_STATE_READY==gw_arp_state)
+						{
+							// send a real alarm
+							strcpy(gStrbuf,"a=0:");
+							strcat(gStrbuf,password);
+							strcat(gStrbuf,", n=");
+							strcat(gStrbuf,myname);
+							strcat(gStrbuf,"\n");
+							send_udp(buf,gStrbuf,strlen(gStrbuf),udpsrvport, udpsrvip, udpsrvport, gwmac);
+						}
+					}
 				}
 				
+				if (contact_debounce)
+				{
+					contact_debounce--;
+					
+					if (0 == contact_debounce)
+					{
+						ALARM_LEDOFF;
+						alarmInt = 0; // Reset INT flag at the end of debouncing period to allow new alarm int-s
+					}
+				}				
+
 				// we are idle here - look up GW MAC
-				if (gw_arp_state==0)
+				if (gw_arp_state==GW_ARP_STATE_NOT_INITIALIZED)
 				{
 					// find the mac address of the gateway
 					get_mac_with_arp(gwip,TRANS_NUM_GWMAC,&arpresolver_result_callback);
-					gw_arp_state=1;
+					gw_arp_state=GW_ARP_STATE_IN_PROGRESS;
 				}
-				if (get_mac_with_arp_wait()==0 && gw_arp_state==1)
+				if (get_mac_with_arp_wait()==0 && gw_arp_state==GW_ARP_STATE_IN_PROGRESS)
 				{
 					// done we have the mac address of the GW
-					gw_arp_state=2;
+					gw_arp_state=GW_ARP_STATE_READY;
 				}
 				
 				// Post heartbeat message if the counter expires
-				if (heartbeat_counter >= heartbeat_timeout_sec && 2==gw_arp_state)
+				if (heartbeat_counter >= heartbeat_timeout_sec && GW_ARP_STATE_READY==gw_arp_state)
 				{
 					heartbeat_counter = 0;
 					snprintf(gStrbuf, STR_BUFFER_SIZE, "hb:n=%s\n", myname);
@@ -529,9 +557,8 @@ int main(void){
 					ETH_LEDON;
 					flash_eth_led_ctr=1;
 				}
-				
-				continue;
 			}
+			continue;
 		}
 		
 		do {
