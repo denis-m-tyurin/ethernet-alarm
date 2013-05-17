@@ -177,7 +177,7 @@ uint16_t print_webpage(void)
 {
 	uint16_t plen;
 	plen=http200ok();
-	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[alarm config]</a> <a href=/n>[network config]</a> <a href=./>[refresh]</a> <a href=/r>[device reset]</a>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[alarm config]</a> <a href=/n>[network config]</a> <a href=./>[refresh]</a>"));
 	plen=fill_tcp_data_p(buf,plen,PSTR("<h2>Alarm: "));
 	plen=fill_tcp_data(buf,plen,myname);
 	plen=fill_tcp_data_p(buf,plen,PSTR("</h2><pre>\n"));
@@ -243,10 +243,6 @@ int8_t analyse_get_url(char *str)
 		gPlen=print_net_config();
 		return(10);
 	}	
-	if (*str == 'r'){
-		DEVICE_RESET;
-		return(10);
-	}
 	if (*str == 'u'){
 		if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"pw")){
 			urldecode(gStrbuf);
@@ -424,10 +420,11 @@ int main(void){
 	init_cnt2();
 	sei();
 
+
 	//init the web server ethernet/ip layer:
 	init_udp_or_www_server(mymac,myip);
 	www_server_port(MYWWWPORT);
-
+		
 	if (dhcpOn)
 	{
 		ALARM_LEDON;
@@ -437,7 +434,7 @@ int main(void){
 		{
 			gPlen=enc28j60PacketReceive(BUFFER_SIZE, buf);
 			buf[BUFFER_SIZE]='\0';
-			rval=packetloop_dhcp_initial_ip_assignment(buf,gPlen,mymac[5]);
+			rval=packetloop_dhcp_initial_ip_assignment(buf,gPlen,mymac[5]);			
 		}
     
 		// we have an IP:
