@@ -59,7 +59,7 @@ typedef enum
 } GW_ARP_STATES_T;
 
 static uint8_t gwmac[6];
-static uint8_t gw_arp_state=GW_ARP_STATE_NOT_INITIALIZED;
+static GW_ARP_STATES_T gw_arp_state=GW_ARP_STATE_NOT_INITIALIZED;
 static uint16_t heartbeat_timeout_sec=10;
 static volatile uint16_t heartbeat_counter=0; 
 static uint8_t dhcpOn=1;
@@ -89,6 +89,8 @@ static volatile uint8_t flash_alarm_led_ctr=0;
 #define ALARM_LEDOFF PORTC&=~(1<<PC4)
 // to test the state of the LED
 #define ALARM_LEDISON PINC&(1<<PC4)
+
+#define DEVICE_RESET {wdt_reset(); wdt_enable(WDTO_2S); while (1);}
 
 uint8_t verify_password(char *str)
 {
@@ -175,7 +177,7 @@ uint16_t print_webpage(void)
 {
 	uint16_t plen;
 	plen=http200ok();
-	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[alarm config]</a> <a href=/n>[network config]</a> <a href=./>[refresh]</a>"));
+	plen=fill_tcp_data_p(buf,plen,PSTR("<a href=/c>[alarm config]</a> <a href=/n>[network config]</a> <a href=./>[refresh]</a> <a href=/r>[device reset]</a>"));
 	plen=fill_tcp_data_p(buf,plen,PSTR("<h2>Alarm: "));
 	plen=fill_tcp_data(buf,plen,myname);
 	plen=fill_tcp_data_p(buf,plen,PSTR("</h2><pre>\n"));
@@ -232,15 +234,19 @@ int8_t analyse_get_url(char *str)
 {
 	// the first slash:
 	if (*str == 'c'){
-		// configpage:
+		// alarm configpage:
 		gPlen=print_alarm_config();
 		return(10);
 	}
 	if (*str == 'n'){
-		// configpage:
+		// network configpage:
 		gPlen=print_net_config();
 		return(10);
 	}	
+	if (*str == 'r'){
+		DEVICE_RESET;
+		return(10);
+	}
 	if (*str == 'u'){
 		if (find_key_val(str,gStrbuf,STR_BUFFER_SIZE,"pw")){
 			urldecode(gStrbuf);
@@ -446,7 +452,7 @@ int main(void){
 			// otherwise this code will not work
 			ALARM_LEDON; // error
 			ETH_LEDON;
-			while(1); // stop here			
+			DEVICE_RESET; // stop here and reset in 2 sec
 		}
 	}
 	
